@@ -41,6 +41,9 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent
+from tools.grow.contract import GrowItem, GrowFailure
+from pydantic import StrictStr
 
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
@@ -511,7 +514,7 @@ def _safe_exception_detail(exc: BaseException) -> str:
     )
 
 
-async def _with_notice(coro: Awaitable[str], op: str = "", args: dict | None = None) -> str:
+async def _with_notice(coro: Awaitable[str], op: str = "", args: dict | None = None, grow_errors: bool = False) -> str:
     """所有 MCP 工具调用的包装器。
 
     职责（统一错误规范）：
@@ -556,7 +559,12 @@ async def _with_notice(coro: Awaitable[str], op: str = "", args: dict | None = N
             notice = _pop_deletion_notice()
         except Exception:
             pass
+        if grow_errors:
+            known_failed = getattr(e, "failure_class", None) == "execution_failed"
+            return CallToolResult(isError=True, content=[TextContent(type="text", text=err_str + extras)], structuredContent={"result": err_str + extras, "failureClass": "execution_failed" if known_failed else "execution_unknown", "executed": False if known_failed else None, "outcomeUnknown": not known_failed})
         return (notice + err_str + extras) if notice else (err_str + extras)
+    if grow_errors and isinstance(result, GrowFailure):
+        return CallToolResult(isError=True, content=[TextContent(type="text", text=str(result))], structuredContent={"result": str(result), "failureClass": result.failure_class, "executed": False if result.failure_class in ("parameter_validation", "execution_failed") else None, "outcomeUnknown": result.failure_class == "execution_unknown"})
     # 正常路径
     if op:
         _log_op_ok(op, result)
@@ -753,14 +761,15 @@ async def hold(
 
 
 @mcp.tool()
-async def grow(content: str = "", items: Optional[list] = None) -> str:
+async def grow(content: str = "", items: Optional[list[StrictStr | GrowItem]] = None) -> str:
     """仅在对话中已明确要求整理并写入长期记忆时调用，不要根据普通聊天自行推断写入意图。整理一段长文本(如一天的记录/一段日记/一篇总结)存入记忆,系统拆分为 2~6 条独立事件桶并各自尝试合并。短内容(<30 字)走 hold 单条快速路径,不强行拆分。
 
     进阶(可选):若你已经把长文拆成 N 条最终正文，可传字符串 items，或对象 items=[{"title":"最终标题","content":"最终正文","tags":["中文短标签"],"importance":5,"domain":["恋爱"],"valence":0.8,"arousal":0.4,"source_ranges":[[1,20]]}]。显式字段优先于自动打标，正文逐字入库，合并时也不压缩。同时传 content 时，content 是整批共享的隐藏原文证据，只保存一次；source_ranges 使用 1-based 闭区间把每个桶连回自己的原文片段。"""
     return await _with_notice(
-        _t_grow.dispatch(content, items=items),
+        _t_grow.dispatch(content, items=[i.model_dump(exclude_unset=True) if isinstance(i, GrowItem) else i for i in items] if items is not None else None),
         op="grow",
         args={"content_len": len(content or ""), "items": len(items or [])},
+        grow_errors=True,
     )
 
 

@@ -6,7 +6,7 @@ issue 诉求：上层 AI 已拆好的正文应逐字入库，消除「廉价 LLM
 2. 存进桶的正文与传入**一字不差**；
 3. 同批共享 grow_batch_id；不传 items 时行为不变（走原 digest 路径）。
 """
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, AsyncMock
 from pathlib import Path
 
 import pytest
@@ -15,7 +15,28 @@ import tools._runtime as rt
 from tools.grow import dispatch
 from tools.grow.core import grow_core, grow_items
 from errors import PublicToolError
+from tools.grow.contract import GrowFailure
 from ombrebrain.storage.source_store import SourceStore
+
+@pytest.mark.asyncio
+async def test_partial_or_failed_batch_is_never_a_success_receipt(grow_rt, monkeypatch):
+    import importlib
+    core = importlib.import_module("tools.grow.core")
+    count = 0
+    async def partial(**kwargs):
+        nonlocal count
+        count += 1
+        if count == 2:
+            raise OSError("private failure")
+        return ("fixture-id", False, None)
+    monkeypatch.setattr(core, "merge_or_create", partial)
+    monkeypatch.setattr(core, "check_duplicate_for", AsyncMock())
+    monkeypatch.setattr(core, "check_plan_resolution", AsyncMock())
+    result = await grow_items(["one", "two"])
+    assert isinstance(result, GrowFailure)
+    assert result.failure_class == "execution_unknown"
+    assert "新1合0" in result
+    assert "private failure" not in result
 
 
 class StubDehydrator:

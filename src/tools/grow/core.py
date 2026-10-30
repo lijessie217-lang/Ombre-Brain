@@ -28,6 +28,7 @@ import asyncio
 import uuid
 
 from utils import normalize_memory_title
+from .contract import GrowFailure, GrowExecutionError
 
 try:
     from errors import PublicToolError
@@ -52,17 +53,17 @@ async def grow_core(content: str) -> str:
             "Diary digest failed / 日记整理失败: err_type=%s detail=hidden",
             type(e).__name__,
         )
-        raise PublicToolError(
+        raise GrowExecutionError(
             "API key 未配置或调用失败，日记拆分无法完成，桶未创建。"
             "请检查 OMBRE_COMPRESS_API_KEY。"
         ) from e
 
     if not isinstance(items, list) or not items:
-        return "内容为空或整理失败。"
+        return GrowFailure("内容为空或整理失败。", "execution_failed")
     payload_err = check_grow_items_payload(items)
     if payload_err:
         rt.logger.warning(f"grow digest output rejected: {payload_err}")
-        return payload_err
+        return GrowFailure(payload_err)
 
     # iter 2.0 来源追踪：同一次 grow 拆出的所有桶共享同一个 batch_id，
     # dashboard 可按 grow_batch_id 聚合显示「这次日记一共归档了哪些事件」。
@@ -113,7 +114,7 @@ async def grow_core(content: str) -> str:
     summary = f"{len(items)}条|新{created}合{merged} batch:{batch_id}\n" + "\n".join(results)
     if embed_warnings:
         summary += f"\n⚠️ {embed_warnings[0]}"
-    return summary
+    return GrowFailure(summary, "execution_unknown") if created + merged < len(items) else summary
 
 
 async def grow_items(items: list, source_content: str = "") -> str:
@@ -127,7 +128,7 @@ async def grow_items(items: list, source_content: str = "") -> str:
     """
     payload_err = check_grow_items_payload(items)
     if payload_err:
-        return payload_err
+        return GrowFailure(payload_err)
 
     # 规整：字典条目会保留人工给出的最终元数据；未给出的字段才由 analyze 补齐。
     clean: list[dict] = []
@@ -144,11 +145,11 @@ async def grow_items(items: list, source_content: str = "") -> str:
         if s:
             clean.append(item)
     if not clean:
-        return "items 为空或都不合法，未创建任何桶。"
+        return GrowFailure("items 为空或都不合法，未创建任何桶。")
     if not source_content.strip() and any(
         item.get("source_ranges") not in (None, [], "") for item in clean
     ):
-        return "source_ranges 需要同时提供 content 作为原文，未创建任何桶。"
+        return GrowFailure("source_ranges 需要同时提供 content 作为原文，未创建任何桶。")
 
     source_ref = ""
     if source_content and source_content.strip():
@@ -162,8 +163,10 @@ async def grow_items(items: list, source_content: str = "") -> str:
                     raise ValueError(f"source_ranges 超出原文总行数 {line_count}")
                 item["_source_ranges"] = ranges
             source_ref = rt.source_store.put(source_content)
-        except (OSError, ValueError) as exc:
-            return f"原文证据保存失败，未创建任何桶：{exc}"
+        except ValueError:
+            return GrowFailure("source_ranges 超出原文总行数或范围不合法，未创建任何桶。")
+        except OSError:
+            return GrowFailure("原文证据保存失败，未创建任何桶。", "execution_failed")
 
     batch_id = f"g_{uuid.uuid4().hex[:12]}"
     results = []
@@ -277,4 +280,4 @@ async def grow_items(items: list, source_content: str = "") -> str:
         summary += "\n⚠️ 打标 API 暂不可用：正文已逐字保存，未做任何压缩；元数据暂用本地中性值。"
         if any(not (item.get("title") or "").strip() for item in clean):
             summary += " 无标题的桶需先在 Dashboard 设置标题，才能用 source_read 核对原文。"
-    return summary
+    return GrowFailure(summary, "execution_unknown") if created + merged < len(clean) else summary

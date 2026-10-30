@@ -25,6 +25,7 @@ from .. import _runtime as rt
 from .._common import check_grow_input_size, check_grow_items_payload
 from .shortpath import grow_shortpath
 from .core import grow_core, grow_items
+from .contract import GrowFailure
 
 
 async def dispatch(content: str = "", items: Optional[list] = None) -> str:
@@ -35,19 +36,19 @@ async def dispatch(content: str = "", items: Optional[list] = None) -> str:
     if isinstance(items, list) and len(items) > 0:
         err = check_grow_items_payload(items)
         if err:
-            return err
+            return GrowFailure(err)
         if content and content.strip():
             err = check_grow_input_size(content)
             if err:
-                return err
+                return GrowFailure(err)
         return await grow_items(items, source_content=content)
 
     if not content or not content.strip():
-        return "内容为空，无法整理。"
+        return GrowFailure("内容为空，无法整理。")
 
     err = check_grow_input_size(content)
     if err:
-        return err
+        return GrowFailure(err)
 
     if len(content.strip()) < 30:
         return await grow_shortpath(content)
